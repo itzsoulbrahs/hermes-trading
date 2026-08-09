@@ -16,10 +16,16 @@ from .adapters import macro as macro_adapter
 from .score import score
 
 STATE_DIR = Path(__file__).parent.parent / "state"
+# Durable data dir: survives redeploys when a Railway volume is mounted there.
+# Strategy/goal stay in the image (git is their source of truth); only
+# accumulated outcomes need to persist across deploys.
+DATA_DIR = Path(os.environ.get("HERMES_DATA_DIR", STATE_DIR))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
 STRATEGY_PATH = STATE_DIR / "strategy.yaml"
-TRADES_PATH = STATE_DIR / "trades.jsonl"
-HEARTBEAT_PATH = STATE_DIR / "heartbeat.json"
 GOAL_PATH = STATE_DIR / "goal.yaml"
+TRADES_PATH = DATA_DIR / "trades.jsonl"
+HEARTBEAT_PATH = DATA_DIR / "heartbeat.json"
 
 MAX_CONSECUTIVE_FAILURES = 5
 RETRY_ATTEMPTS = 3
@@ -56,9 +62,15 @@ def write_heartbeat(status: str = "ok", last_action: str = ""):
 
 
 def log_trade(trade: dict):
-    """Append trade to JSONL file."""
+    """Append trade to JSONL file and emit it to stdout.
+
+    The stdout line is the observability channel: the container filesystem is
+    not reachable from outside, so `railway logs` is how a closed trade becomes
+    visible. Prefix is grep-able and the payload is the exact JSONL record.
+    """
     with open(TRADES_PATH, "a") as f:
         f.write(json.dumps(trade) + "\n")
+    print(f"TRADE_CLOSED {json.dumps(trade)}", flush=True)
 
 
 async def retry_fetch(fetch_func, *args, **kwargs):

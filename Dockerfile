@@ -8,4 +8,8 @@ COPY hermes_trading ./hermes_trading
 COPY state ./state
 RUN uv sync
 ENV HERMES_TRADING_MODE=paper
+# Unbuffered stdout: without this the loop's prints never reach `railway logs`.
+ENV PYTHONUNBUFFERED=1
+# Durable outcome storage; mount a Railway volume here to survive redeploys.
+ENV HERMES_DATA_DIR=/app/data
 CMD ["uv", "run", "python", "-m", "hermes_trading.run"]
