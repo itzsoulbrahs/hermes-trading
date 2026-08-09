@@ -1,3 +1,5 @@
-.git-local/  
-hermes-git/  
-.venv/ 
+.git-local/
+hermes-git/
+.venv/
+__pycache__/
+*.pyc
