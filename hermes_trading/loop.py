@@ -121,6 +121,54 @@ def evaluate_strategy(market_data: dict, strategy: dict) -> dict:
     return {"action": "hold", "reason": f"{indicator} ({current_value:.1f}) not crossing threshold ({threshold})"}
 
 
+def evaluate_exit(market_data: dict, strategy: dict, position: dict) -> dict:
+    """Decide whether an open position should be closed.
+
+    Entry-only strategies deadlock: with direction=long, evaluate_strategy()
+    can only ever return buy/hold, so a position's sole exit was stop_loss and
+    every closed trade was a guaranteed loser. This supplies the missing leg.
+
+    Both conditions are read from strategy.yaml's `exit` block so reflection
+    cycles can tune them like any other variable. Either may be omitted (null)
+    to disable that condition; stop_loss remains handled by the caller.
+
+    Returns {"action": "close"|"hold", "reason": str, "exit_reason": str}.
+    """
+    exit_cfg = strategy.get("exit") or {}
+    entry_price = position["entry_price"]
+    current_price = market_data.get("data", {}).get("close")
+
+    if current_price is None or not entry_price:
+        return {"action": "hold", "reason": "no price data"}
+
+    # Take-profit: gain since entry, in the direction of the position.
+    take_profit_pct = exit_cfg.get("take_profit_pct")
+    if take_profit_pct is not None:
+        if position.get("direction", "long") == "long":
+            gain_pct = (current_price - entry_price) / entry_price * 100
+        else:
+            gain_pct = (entry_price - current_price) / entry_price * 100
+        if gain_pct >= take_profit_pct:
+            return {
+                "action": "close",
+                "exit_reason": "take_profit",
+                "reason": f"gain {gain_pct:.2f}% >= take_profit_pct ({take_profit_pct}%)",
+            }
+
+    # Mean-reversion exit: RSI recovered into overbought territory.
+    rsi_exit = exit_cfg.get("rsi_exit")
+    rsi = market_data.get("data", {}).get("rsi")
+    if rsi_exit is not None and rsi is not None:
+        if position.get("direction", "long") == "long" and rsi >= rsi_exit:
+            return {
+                "action": "close",
+                "exit_reason": "rsi_exit",
+                "reason": f"rsi ({rsi:.1f}) >= rsi_exit ({rsi_exit})",
+            }
+
+    return {"action": "hold", "reason": "no exit condition met"}
+
+
 async def run_loop(asset: str = "BTC/USDT"):
     """Main trading loop."""
     consecutive_failures = 0
@@ -178,7 +226,7 @@ async def run_loop(asset: str = "BTC/USDT"):
             
             # Paper trade logic
             mode = os.environ.get("HERMES_TRADING_MODE", "paper")
-            if mode == "paper" and signal["action"] in ("buy", "sell"):
+            if mode == "paper":
                 if active_position is None and signal["action"] == "buy":
                     # Open long position
                     position_size = strategy.get("position_size_r", 0.5)
@@ -191,35 +239,41 @@ async def run_loop(asset: str = "BTC/USDT"):
                         "stop_loss_pct": strategy.get("stop_loss_pct", 2.0),
                     }
                     print(f"  -> Paper LONG opened at ${entry_price:.2f}")
-                    
-                elif active_position is not None and signal["action"] == "sell":
-                    # Close position
-                    exit_price = price_data["data"]["close"]
-                    entry_price = active_position["entry_price"]
-                    
-                    if active_position["direction"] == "long":
-                        pnl_pct = (exit_price - entry_price) / entry_price
-                    else:
-                        pnl_pct = (entry_price - exit_price) / entry_price
-                    
-                    pnl = pnl_pct * active_position["size"]
-                    
-                    trade_record = {
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "asset": asset,
-                        "direction": active_position["direction"],
-                        "entry_price": entry_price,
-                        "exit_price": exit_price,
-                        "pnl": round(pnl, 6),
-                        "pnl_pct": round(pnl_pct, 6),
-                        "size": active_position["size"],
-                        "strategy_version": strategy.get("version", "01"),
-                    }
-                    
-                    log_trade(trade_record)
-                    print(f"  -> Paper position closed: PnL = {pnl_pct:.4%} (${pnl:.4f})")
-                    
-                    active_position = None
+
+                elif active_position is not None:
+                    # Exit is driven by the strategy's `exit` block, not by the
+                    # entry signal: a long-only entry rule never emits "sell".
+                    exit_decision = evaluate_exit(price_data, strategy, active_position)
+
+                    if exit_decision["action"] == "close":
+                        exit_price = price_data["data"]["close"]
+                        entry_price = active_position["entry_price"]
+
+                        if active_position["direction"] == "long":
+                            pnl_pct = (exit_price - entry_price) / entry_price
+                        else:
+                            pnl_pct = (entry_price - exit_price) / entry_price
+
+                        pnl = pnl_pct * active_position["size"]
+
+                        trade_record = {
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "asset": asset,
+                            "direction": active_position["direction"],
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "pnl": round(pnl, 6),
+                            "pnl_pct": round(pnl_pct, 6),
+                            "size": active_position["size"],
+                            "strategy_version": strategy.get("version", "01"),
+                            "exit_reason": exit_decision["exit_reason"],
+                        }
+
+                        log_trade(trade_record)
+                        print(f"  -> Paper position closed ({exit_decision['exit_reason']}): "
+                              f"{exit_decision['reason']} | PnL = {pnl_pct:.4%} (${pnl:.4f})")
+
+                        active_position = None
             
             # Check stop loss for active position
             if active_position is not None:
