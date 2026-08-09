@@ -193,7 +193,7 @@ if [ -f "$WATCH" ]; then
   run(){ PATH="$SB:$PATH" bash "$WATCH" 2>/dev/null; }
   feed(){ local o="[t] Iteration 9: hold" i
           for ((i=1;i<=$1;i++)); do o+=$'\n'"TRADE_CLOSED {\"i\":$i}"; done; printf '%s' "$o"; }
-  orig=$(cat "$MARK"); printf '0\n' > "$MARK"
+  orig=$(mktemp "$BTMP/mark.XXXXXX"); cp "$MARK" "$orig"; printf '0\n' > "$MARK"
 
   mk "$(printf '$VIX: possibly delisted\n[t] Iteration 1: hold')"; r=$(run)
   case "$r" in *"closed_trades_in_log_window: 0"*) ok "adapter noise is not a trade";; *) no "noise leak" "$r";; esac
@@ -205,7 +205,9 @@ if [ -f "$WATCH" ]; then
   printf '4\n' > "$MARK"; r=$(run)
   case "$r" in *"since_last_reflection: 2"*) ok "high-water mark: 6-4=2 new";; *) no "delta math" "$r";; esac
   case "$r" in *"reflection_due: NO"*) ok "counted trades never re-trigger";; *) no "re-triggered" "$r";; esac
-  printf '%s' "$orig" > "$MARK"
+  cp "$orig" "$MARK"
+  git diff --quiet -- state/.last_reflection_count \
+    && ok "reflection counter restored byte-exact" || no "counter left dirty"
   mk "$(printf 'Starting Container\nStopping Container')"; r=$(run)
   case "$r" in *WORKER_WARNING*) ok "silent worker flagged";; *) no "missed dead worker" "$r";; esac
 else
